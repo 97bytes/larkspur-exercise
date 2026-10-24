@@ -22,3 +22,7 @@ readout-trace.json
 __pycache__/
 *.pyc
 .DS_Store
+
+# Sublime Text editor settings
+*.sublime-project
+*.sublime-workspace

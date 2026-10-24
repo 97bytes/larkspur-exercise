@@ -9,6 +9,7 @@ Where you edit:   grep -n '✏' agent.py   (six marks, one per place)
 Steps and gates:  https://anthropicpartnerbasecamp.bts.com/
 """
 from __future__ import annotations
+from pathlib import Path
 from typing import Any, Dict, List
 from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
                      new_session, next_available_day, record_tool_result,
@@ -16,9 +17,37 @@ from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
 
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
-TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
+TONE_ADDENDUM = """
+
+If the customer is angry or insulting, acknowledge their frustration in one short sentence, do not respond to the insult, and continue solving their problem.
+If the customer threatens legal action, do not argue or comment on it. Say a colleague will review their case, and call escalate_to_human with a clear reason and a summary of the situation. Keep helping with anything within your scope.
+If the customer asks for something you cannot do, say so plainly and call escalate_to_human instead of trying.
+Never argue, retaliate, admit fault, give legal opinions, or promise compensation or outcomes that check_policy did not return.
+Never invent what the human team will do or how long it will take.
+"""  # ✏️ Build 4, step 4.1, intelligence goal
 EXTRA_TOOLS: List[Dict[str, Any]] = []   # ✏️ Build 2, step 2.1: schemas for the tools you add
-LOCAL_TOOLS: Dict[str, Any] = {}         # ✏️ Build 2, step 2.1: the functions behind them
+
+def fare_rules(topic) -> str:
+    HERE = Path(__file__).resolve().parent
+    FARE_RULES_PATH = HERE / "data" / "americas" / "fare_rules_excerpt.md"
+    text = FARE_RULES_PATH.read_text(encoding="utf-8")
+    pieces = text.split("### ")[1:]
+
+    words = [w for w in topic.lower().split() if len(w) > 3]
+    found = []
+    for piece in pieces:
+        for word in words:
+            if word in piece.lower():
+                found.append(piece)
+                break
+
+    if not found:
+        return "No fare rule found for '%s'. Do not guess a rule." % topic
+    return "\n\n".join(found)
+
+
+LOCAL_TOOLS: Dict[str, Any] = {} # ✏️ Build 2, step 2.1: the functions behind them
+# LOCAL_TOOLS: Dict[str, Any] = {"next_available_day": next_available_day, "fare_rules": fare_rules }         # ✏️ Build 2, step 2.1: the functions behind them
 
 
 def text_of(response) -> str:
@@ -68,22 +97,24 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
     answer = ""
     turns = 1
     while response.stop_reason == "tool_use" and turns < MAX_TOOL_CALLS:
-        messages.append({"role": "assistant", "content": text_of(response)})
+        # messages.append({"role": "assistant", "content": text_of(response)})
+        messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results(response)})
-        answer = text_of(response)
+        # answer = text_of(response)
         response = client.messages.create(
             model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
             thinking={"type": "adaptive"}, tools=tools, messages=messages,
         )
         turns += 1
-
+    answer = text_of(response)
     return answer
 
 
 def tool_list() -> List[Dict[str, Any]]:                   # ✏️ Build 2, step 2.2
     """Given. Exactly what Claude is offered on every turn; run.py --show-tools
     prints this list."""
-    return build_tools() + EXTRA_TOOLS
+    # return build_tools() + EXTRA_TOOLS
+    return build_tools() + mcp_client.tools()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -119,14 +150,15 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "type": "object",
                 "properties": {
                     "flight_no": {"type": "string"},
-                    "date": {"type": "string", "description": "MM/DD/YYYY"},
+                    #"date": {"type": "string", "description": "MM/DD/YYYY"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
                 },
                 "required": ["flight_no", "date"],
             },
         },
         {
             "name": "search_alternatives",
-            "description": "search",
+            "description": "Find rebooking options for the disrupted segment on this reservation. Call after get_flight_status shows DELAYED, CANCELLED or DIVERTED. Returns options with option_id, flight, times, cabin, seats and wait_minutes. Use option_id with hold_seat, and wait_minutes as wait_minutes_for_alternative in check_policy. Availability can change, so don't promise a seat until hold_seat succeeds. If no options are returned, use escalate_to_human.",
             "input_schema": {
                 "type": "object",
                 "properties": {"pnr": {"type": "string"}},
